@@ -1,0 +1,4 @@
+accounts.conf
+proxies/*.txt
+.hgincome/
+*.log

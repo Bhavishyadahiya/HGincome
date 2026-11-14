@@ -1,0 +1,23 @@
+# Copy this structure into accounts.conf and fill in your own credentials.
+# Use only accounts/connections you are authorized to operate under current terms.
+ACCOUNT_IDS=(personal second)
+
+ACCOUNT_EMAIL[personal]=''
+ACCOUNT_PASSWORD[personal]=''
+ACCOUNT_DEVICES[personal]=10
+ACCOUNT_NETWORK[personal]='proxy'
+ACCOUNT_PROXY_FILE[personal]='proxies/personal.txt'
+# Optional: default is hg-<saved-instance-id>-personal.
+# ACCOUNT_DEVICE_PREFIX[personal]='my-personal-hg'
+
+ACCOUNT_EMAIL[second]=''
+ACCOUNT_PASSWORD[second]=''
+ACCOUNT_DEVICES[second]=10
+ACCOUNT_NETWORK[second]='proxy'
+ACCOUNT_PROXY_FILE[second]='proxies/second.txt'
+# ACCOUNT_DEVICE_PREFIX[second]='my-second-hg'
+
+# Without a proxy, use ACCOUNT_NETWORK[id]='direct' and ACCOUNT_DEVICES[id]=1.
+# Only one direct device is allowed across this whole folder.
+# Passwords are literal Bash strings: single quotes protect $, spaces, and !.
+# For a literal apostrophe use 'first'\''second', or another valid Bash quoting form.
