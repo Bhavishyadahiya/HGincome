@@ -14,7 +14,7 @@ A Bash + Docker Honeygain manager inspired by [InternetIncome-debloated](https:/
 - A host architecture supported by both selected images. The Honeygain amd64 image and tun2proxy v0.8.5 entrypoint were verified on an Arch Linux x86_64 Docker host; other architectures are untested.
 - Your own Honeygain credentials and eligible, stable connections. A proxy endpoint must keep a suitable exit IP; rotating exits can change service identity or violate rules.
 
-Windows Git Bash can run syntax checks and the mock tests. **Docker Desktop/Git Bash is not a supported proxy runtime**; run the manager on the Linux Docker host. Do not point it at a remote Docker daemon: bind mounts and `/dev/net/tun` must exist on the same host as the manager.
+Windows Git Bash can run syntax checks. **Docker Desktop/Git Bash is not a supported proxy runtime**; run the manager on the Linux Docker host. Do not point it at a remote Docker daemon: bind mounts and `/dev/net/tun` must exist on the same host as the manager.
 
 ## Files
 
@@ -28,7 +28,6 @@ HGincome/
     personal.txt           # first account's proxy list
     second.txt             # second account's proxy list
   restart.sh               # restart convenience wrapper
-  tests/                   # isolated Bash mock-Docker tests
   .hgincome/               # generated private instance ID and resolver file
 ```
 
@@ -191,21 +190,6 @@ A `.hgincome/lock` directory prevents overlapping manager mutations. If a proces
 - A running tunnel is only a process-state check. Failed authentication or unreachable exits can still produce a running process. Use tunnel logs and Honeygain's dashboard to investigate.
 - The Honeygain amd64 CLI was verified using a help-only container with networking disabled. Real account login and current service policies remain unverified. Image tags are not immutable: pulling a changed `latest` tag does not update already created containers. Pin image digests for reproducibility; deliberately delete/recreate affected accounts to apply image updates.
 - The verified tun2proxy v0.8.5 entrypoint includes `--setup`. TUN interface/routes, HTTP traffic through a SOCKS5 proxy, DNS-over-TCP, and a dependency-ordered restart passed an isolated real-Docker test on Linux. Neither the running-state check nor dependency-ordered manual restart guarantees route readiness for arbitrary proxies, fail-closed egress, or automatic recovery ordering after Docker daemon failures.
-
-## Tests
-
-```bash
-for script in HGincome.sh restart.sh tests/*.sh; do bash -n "$script" || exit; done
-bash tests/run.sh
-```
-
-The default `tests/run.sh` suite uses only Bash and a locally written Docker mock. It covers two accounts with 10 slots each, per-account operations, proxy syntax/duplicates, passwords with metacharacters, idempotency, stale configuration, locks, startup failure cleanup, deletion confirmation, and stable naming.
-
-The mock proxy tests call the production device-pair function through a test-only driver so they work on hosts lacking Linux `/dev/net/tun`. **They do not bypass that requirement in the real entrypoint and do not prove real Docker networking works.** Fixtures use synthetic `example.invalid` credentials and documentation-range IPs. Each run keeps its isolated temporary fixture directory for inspection; the path is printed.
-
-No Python, dependency installers, live Docker actions, or external credential submissions are used by `tests/run.sh`.
-
-Separate opt-in Linux integration scripts, `tests/linux-network.sh` and `tests/linux-lifecycle.sh`, do use real Docker. The network test uses Node.js inside a test container only for its local SOCKS5/DNS/HTTP fixture; HGincome itself remains Bash + Docker and needs no Node.js or Python. These tests create labeled temporary containers and clean those containers/networks up. They assume test images are available and must only be run with approval on an isolated host. See [TESTING.md](TESTING.md) for the verified results and limitations.
 
 ## Attribution
 
