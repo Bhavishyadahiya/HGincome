@@ -2,3 +2,5 @@ accounts.conf
 proxies/*.txt
 .hgincome/
 *.log
+/tests/
+/TESTING.md

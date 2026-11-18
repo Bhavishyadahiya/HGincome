@@ -8,6 +8,7 @@ INSTANCE_ID=''
 LOCK_HELD=false
 COMMAND=''
 SELECT_ACCOUNT=''
+SELECT_ACCOUNT_ID=''
 SELECT_DEVICE=''
 YES=false
 TUNNEL_LOGS=false
@@ -20,8 +21,11 @@ usage() {
     printf '%s\n' \
         'HGincome — Honeygain account/device manager (Bash + Docker)' \
         '' \
-        'Usage: bash HGincome.sh COMMAND [OPTIONS]' \
+        'Usage: bash HGincome ACCOUNT COMMAND [OPTIONS]' \
+        '       bash HGincome COMMAND [OPTIONS]  (all accounts)' \
+        '       bash HGincome.sh COMMAND --account ACCOUNT  (compatible syntax)' \
         '' \
+        '  --accounts   List account names, device counts, and proxy files' \
         '  --check      Validate all accounts and proxies without Docker' \
         '  --start      Create or start configured devices' \
         '  --stop       Stop managed containers, keeping their identities' \
@@ -42,9 +46,14 @@ usage() {
 }
 
 parse_args() {
+    if (($#)) && [[ $1 != -* ]]; then
+        [[ -n $1 ]] || die 'Account ID must not be empty.'
+        SELECT_ACCOUNT=$1
+        shift
+    fi
     while (($#)); do
         case "$1" in
-            --check|--start|--stop|--restart|--status|--logs|--delete|--pull|--help)
+            --accounts|--check|--start|--stop|--restart|--status|--logs|--delete|--pull|--help)
                 [[ -z $COMMAND ]] || die 'Choose exactly one command.'
                 COMMAND=$1
                 shift
@@ -52,7 +61,11 @@ parse_args() {
             --account|--device|--tail)
                 (($# >= 2)) || die "Missing value for $1."
                 case "$1" in
-                    --account) SELECT_ACCOUNT=$2 ;;
+                    --account)
+                        [[ -z $SELECT_ACCOUNT ]] || die 'Specify the account once: either ACCOUNT first or --account ACCOUNT.'
+                        [[ -n $2 ]] || die '--account must not be empty.'
+                        SELECT_ACCOUNT=$2
+                        ;;
                     --device) SELECT_DEVICE=$2 ;;
                     --tail) LOG_TAIL=$2 ;;
                 esac
@@ -64,7 +77,11 @@ parse_args() {
         esac
     done
     [[ -n $COMMAND ]] || COMMAND=--help
-    [[ -z $SELECT_ACCOUNT || $SELECT_ACCOUNT =~ ^[a-z][a-z0-9_-]{0,11}$ ]] || die 'Account IDs must be 1–12 lowercase letters, digits, underscores or hyphens, starting with a letter.'
+    if [[ -n $SELECT_ACCOUNT ]]; then
+        valid_account_name "$SELECT_ACCOUNT" || die 'Account names must be 1–64 letters, digits, spaces, dots, underscores or hyphens, starting with a letter or digit and without trailing spaces.'
+        account_id "$SELECT_ACCOUNT"
+        SELECT_ACCOUNT_ID=$REPLY
+    fi
     [[ $LOG_TAIL =~ ^[0-9]{1,5}$ ]] || die '--tail must be a number from 0 to 99999.'
     LOG_TAIL=$((10#$LOG_TAIL))
     if [[ -n $SELECT_DEVICE ]]; then
@@ -93,10 +110,14 @@ load_properties() {
     TUNNEL_START_TIMEOUT=20
     DOCKER_BIN=docker
     [[ -f "$SCRIPT_DIR/properties.conf" ]] || die 'Missing properties.conf.'
-    # These are trusted Bash configuration files, not downloaded data.
+    # Global settings remain trusted Bash code; section-based accounts are data.
     source "$SCRIPT_DIR/properties.conf"
     [[ -n $DOCKER_BIN ]] || die 'Docker executable must not be empty.'
     case "$COMMAND" in
+        --accounts)
+            [[ $DEVICES_PER_ACCOUNT =~ ^[1-9]$|^10$ ]] || die 'DEVICES_PER_ACCOUNT must be 1–10.'
+            return
+            ;;
         --check|--start|--pull) ;;
         --restart)
             [[ $TUNNEL_START_TIMEOUT =~ ^[1-9][0-9]{0,2}$ ]] || die 'TUNNEL_START_TIMEOUT must be 1–999 seconds.'
@@ -134,29 +155,113 @@ normalize_proxy() {
     NORMALIZED_PROXY=$value
 }
 
+valid_account_name() {
+    [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9\ ._-]{0,63}$ && $1 != *' ' ]]
+}
+
+account_id() {
+    if [[ $1 =~ ^[a-z][a-z0-9_-]{0,11}$ ]]; then
+        REPLY=$1
+    else
+        command -v sha256sum >/dev/null 2>&1 || die 'sha256sum is required for custom account names.'
+        REPLY=$(printf '%s' "$1" | sha256sum)
+        REPLY="a-${REPLY:0:10}"
+    fi
+}
+
+trim_whitespace() {
+    REPLY=${1#"${1%%[![:space:]]*}"}
+    REPLY=${REPLY%"${REPLY##*[![:space:]]}"}
+}
+
+read_accounts_file() {
+    local path="$SCRIPT_DIR/accounts.conf" line trimmed account='' key value number=0 format=''
+    local -A sections=() keys=()
+    [[ -f $path && -r $path ]] || die 'Create accounts.conf from accounts.conf.example first.'
+    while IFS= read -r line || [[ -n $line ]]; do
+        number=$((number + 1))
+        line=${line%$'\r'}
+        ((number != 1)) || line=${line#$'\xef\xbb\xbf'}
+        trim_whitespace "$line"
+        trimmed=$REPLY
+        [[ -z $trimmed || $trimmed == \#* || $trimmed == \;* ]] && continue
+        if [[ -z $format ]]; then
+            if [[ $trimmed == ACCOUNT_IDS=* ]]; then
+                # Compatibility only: legacy account files are trusted Bash code.
+                info 'Using legacy Bash accounts.conf; the section-based example avoids executing account data.'
+                source "$path"
+                return
+            fi
+            format=sections
+        fi
+        if [[ $trimmed == \[*\] ]]; then
+            account=${trimmed:1:${#trimmed}-2}
+            valid_account_name "$account" || die "Invalid account name at line $number."
+            [[ -z ${sections[$account]:-} ]] || die "Duplicate account section at line $number."
+            sections[$account]=1
+            ACCOUNT_IDS+=("$account")
+            continue
+        fi
+        [[ $trimmed != \[* ]] || die "Invalid account section at line $number; use [Account Name]."
+        [[ -n $account ]] || die "Account data at line $number needs an [account] section first."
+        [[ $line == *=* ]] || die "Expected key=value at line $number (value hidden)."
+        key=${line%%=*}
+        trim_whitespace "$key"
+        key=$REPLY
+        value=${line#*=}
+        case "$key" in
+            email|password|devices|network|proxy_file|device_prefix) ;;
+            *) die "Unknown account setting at line $number (value hidden)." ;;
+        esac
+        [[ -z ${keys[$account:$key]:-} ]] || die "Duplicate setting for account $account at line $number."
+        keys[$account:$key]=1
+        # Everything after the first '=' is literal, including quotes and spaces.
+        case "$key" in
+            email) ACCOUNT_EMAIL[$account]=$value ;;
+            password) ACCOUNT_PASSWORD[$account]=$value ;;
+            devices) ACCOUNT_DEVICES[$account]=$value ;;
+            network)
+                [[ $value == proxy ]] || die "Proxy is the only supported account network (line $number)."
+                info "Account $account: network setting is obsolete; remove it. Proxies are always used."
+                ;;
+            proxy_file) ACCOUNT_PROXY_FILE[$account]=$value ;;
+            device_prefix) ACCOUNT_DEVICE_PREFIX[$account]=$value ;;
+        esac
+    done < "$path"
+}
+
 load_accounts() {
+    local validate=${1:-true}
     declare -ga ACCOUNT_IDS=()
     declare -gA ACCOUNT_EMAIL=() ACCOUNT_PASSWORD=() ACCOUNT_DEVICES=()
     declare -gA ACCOUNT_NETWORK=() ACCOUNT_PROXY_FILE=() ACCOUNT_DEVICE_PREFIX=()
-    declare -gA DEVICE_PROXY=() COUNTS=() MODES=() PREFIXES=()
-    [[ -f "$SCRIPT_DIR/accounts.conf" ]] || die 'Create accounts.conf from accounts.conf.example first.'
-    source "$SCRIPT_DIR/accounts.conf"
-    ((${#ACCOUNT_IDS[@]})) || die 'No accounts configured. Edit accounts.conf; see accounts.conf.example.'
+    declare -gA DEVICE_PROXY=() COUNTS=() PREFIXES=() ACCOUNT_CONTAINER_ID=()
+    read_accounts_file
+    if ((${#ACCOUNT_IDS[@]} == 0)); then
+        [[ $validate == false && -z $SELECT_ACCOUNT ]] && return 0
+        die 'No accounts configured. Edit accounts.conf; see accounts.conf.example.'
+    fi
 
-    local account count mode prefix path line number index key
-    local direct_count=0 selected=false
-    local -A seen_accounts=() seen_endpoints=() seen_prefixes=()
+    local account count prefix path line number index key id
+    local selected=false
+    local -A seen_accounts=() seen_ids=() seen_endpoints=() seen_prefixes=()
     for account in "${ACCOUNT_IDS[@]}"; do
-        [[ $account =~ ^[a-z][a-z0-9_-]{0,11}$ ]] || die 'Invalid account ID; use 1–12 lowercase characters starting with a letter.'
-        [[ -z ${seen_accounts[$account]:-} ]] || die "Duplicate account ID: $account."
+        valid_account_name "$account" || die 'Invalid account name; use 1–64 letters, digits, spaces, dots, underscores or hyphens.'
+        [[ -z ${seen_accounts[$account]:-} ]] || die "Duplicate account name: $account."
         seen_accounts[$account]=1
-        [[ -n ${ACCOUNT_EMAIL[$account]:-} && -n ${ACCOUNT_PASSWORD[$account]:-} ]] || die "Account $account needs an email and password."
-        [[ ${ACCOUNT_EMAIL[$account]} == *@*.* && ${ACCOUNT_EMAIL[$account]} != *[$'\r\n\t ']* ]] || die "Account $account has an invalid email."
-        [[ ${ACCOUNT_PASSWORD[$account]} != *[$'\r\n']* ]] || die "Account $account has a multiline password."
+        account_id "$account"
+        id=$REPLY
+        [[ -z ${seen_ids[$id]:-} ]] || die "Account identity collision for $account. Choose another name."
+        seen_ids[$id]=1
+        ACCOUNT_CONTAINER_ID[$account]=$id
+        [[ -z ${ACCOUNT_NETWORK[$account]:-} || ${ACCOUNT_NETWORK[$account]} == proxy ]] || die "Account $account: proxy is the only supported network."
+        if [[ $validate == true ]]; then
+            [[ -n ${ACCOUNT_EMAIL[$account]:-} && -n ${ACCOUNT_PASSWORD[$account]:-} ]] || die "Account $account needs an email and password."
+            [[ ${ACCOUNT_EMAIL[$account]} == *@*.* && ${ACCOUNT_EMAIL[$account]} != *[$'\r\n\t ']* ]] || die "Account $account has an invalid email."
+            [[ ${ACCOUNT_PASSWORD[$account]} != *[$'\r\n']* ]] || die "Account $account has a multiline password."
+        fi
         count=${ACCOUNT_DEVICES[$account]:-$DEVICES_PER_ACCOUNT}
         [[ $count =~ ^[1-9]$|^10$ ]] || die "Account $account must request 1–10 devices."
-        mode=${ACCOUNT_NETWORK[$account]:-proxy}
-        [[ $mode == proxy || $mode == direct ]] || die "Account $account network must be proxy or direct."
         prefix=${ACCOUNT_DEVICE_PREFIX[$account]:-}
         if [[ -n $prefix ]]; then
             [[ $prefix =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,28}$ ]] || die "Account $account device prefix must be 1–29 letters, digits, dots, underscores or hyphens."
@@ -164,15 +269,9 @@ load_accounts() {
             seen_prefixes[$prefix]=1
         fi
         COUNTS[$account]=$count
-        MODES[$account]=$mode
         PREFIXES[$account]=$prefix
         [[ -z $SELECT_ACCOUNT || $SELECT_ACCOUNT == "$account" ]] && selected=true
-        if [[ $mode == direct ]]; then
-            ((count == 1)) || die "Account $account: direct mode supports one device. Use eligible independent connections for additional devices."
-            direct_count=$((direct_count + 1))
-            ((direct_count <= 1)) || die 'Only one direct device is allowed across this folder; accounts share the host connection.'
-            continue
-        fi
+        [[ $validate == true ]] || continue
         resolve_path "${ACCOUNT_PROXY_FILE[$account]:-proxies/$account.txt}"
         path=$REPLY
         [[ -f $path && -r $path ]] || die "Missing or unreadable proxy file for account $account."
@@ -194,6 +293,22 @@ load_accounts() {
         ((index <= count)) || info "Account $account: using the first $count of $index proxies."
     done
     [[ $selected == true ]] || die "Unknown account: $SELECT_ACCOUNT."
+}
+
+list_accounts() {
+    load_accounts false
+    if ((${#ACCOUNT_IDS[@]} == 0)); then
+        info 'No accounts configured.'
+        return
+    fi
+    local account total=0
+    printf '%-64s %-7s %s\n' 'ACCOUNT' 'DEVICES' 'PROXY FILE'
+    for account in "${ACCOUNT_IDS[@]}"; do
+        [[ -z $SELECT_ACCOUNT || $SELECT_ACCOUNT == "$account" ]] || continue
+        printf '%-64s %-7s %s\n' "$account" "${COUNTS[$account]}" "${ACCOUNT_PROXY_FILE[$account]:-proxies/$account.txt}"
+        total=$((total + COUNTS[$account]))
+    done
+    info "$total selected device slots. Credentials and proxy URLs are not displayed."
 }
 
 read_instance() {
@@ -235,11 +350,11 @@ docker_ready() {
 docker_cmd() { "$DOCKER_BIN" "$@"; }
 
 set_names() {
-    local account=$1 device=$2
+    local account=$1 device=$2 id=${ACCOUNT_CONTAINER_ID[$1]}
     printf -v SLOT '%02d' "$device"
-    APP_NAME="hgincome-$INSTANCE_ID-$account-$SLOT"
+    APP_NAME="hgincome-$INSTANCE_ID-$id-$SLOT"
     TUN_NAME="$APP_NAME-tun"
-    DEVICE_NAME="${PREFIXES[$account]:-hg-$INSTANCE_ID-$account}-$SLOT"
+    DEVICE_NAME="${PREFIXES[$account]:-hg-$INSTANCE_ID-$id}-$SLOT"
 }
 
 exists() { docker_cmd inspect "$1" >/dev/null 2>&1; }
@@ -288,14 +403,12 @@ check_desired_containers() {
         slot=$(docker_cmd inspect --format '{{ index .Config.Labels "io.hgincome.device" }}' "$name") || die "Cannot inspect $name."
         kind=$(docker_cmd inspect --format '{{ index .Config.Labels "io.hgincome.kind" }}' "$name") || die "Cannot inspect $name."
         [[ $kind == honeygain || $kind == tunnel ]] || die "Unexpected container kind for $name."
-        if [[ ! $account =~ ^[a-z][a-z0-9_-]{0,11}$ || ! $slot =~ ^0[1-9]$|^10$ ]]; then
+        if ! valid_account_name "$account" || [[ ! $slot =~ ^0[1-9]$|^10$ ]]; then
             die "Invalid account/device labels for $name."
         fi
         if [[ -z ${COUNTS[$account]:-} ]]; then
             stale+=("$name")
         elif ((10#$slot > COUNTS[$account])); then
-            stale+=("$name")
-        elif [[ $kind == tunnel && ${MODES[$account]} != proxy ]]; then
             stale+=("$name")
         fi
     done <<< "$MANAGED"
@@ -307,10 +420,10 @@ check_desired_containers() {
 }
 
 start_device() {
-    local account=$1 device=$2 proxy='' mode=${MODES[$1]} new_tunnel=false
+    local account=$1 device=$2 proxy mode=proxy new_tunnel=false
     local -a labels=() run_options=() network_options=()
     set_names "$account" "$device"
-    [[ $mode != proxy ]] || proxy=${DEVICE_PROXY[$account:$device]}
+    proxy=${DEVICE_PROXY[$account:$device]}
     SPEC=$(printf '%s\0' "$INSTANCE_ID" "$account" "$device" "$DEVICE_NAME" "$mode" "$proxy" \
         "${ACCOUNT_EMAIL[$account]}" "${ACCOUNT_PASSWORD[$account]}" "$HONEYGAIN_IMAGE" "$TUN2PROXY_IMAGE" \
         "$TUN2PROXY_DNS_MODE" "$RESTART_POLICY" "$ENABLE_LOGS" "$LOG_MAX_SIZE" "$LOG_MAX_FILES" | sha256sum)
@@ -326,30 +439,28 @@ start_device() {
     # Validate the entire pair before starting or creating either container.
     if exists "$APP_NAME"; then
         assert_spec "$APP_NAME"
-        if [[ $mode == proxy ]] && ! exists "$TUN_NAME"; then
+        if ! exists "$TUN_NAME"; then
             die "Tunnel missing for $APP_NAME. Delete this account's containers and recreate the pair."
         fi
     fi
-    if [[ $mode == proxy ]]; then
-        if exists "$TUN_NAME"; then
-            assert_spec "$TUN_NAME"
-            docker_cmd start "$TUN_NAME" >/dev/null || die "Could not start $TUN_NAME."
-        else
-            if ! docker_cmd run "${run_options[@]}" --name "$TUN_NAME" "${labels[@]}" \
-                --label io.hgincome.kind=tunnel --cap-add NET_ADMIN \
-                --device /dev/net/tun:/dev/net/tun \
-                --sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1 \
-                "$TUN2PROXY_IMAGE" --dns "$TUN2PROXY_DNS_MODE" --proxy "$proxy" --verbosity warn >/dev/null 2>&1; then
-                remove_failed_creation "$TUN_NAME"
-                die "Could not create tunnel for account $account device $SLOT (proxy URL hidden)."
-            fi
-            new_tunnel=true
+    if exists "$TUN_NAME"; then
+        assert_spec "$TUN_NAME"
+        docker_cmd start "$TUN_NAME" >/dev/null || die "Could not start $TUN_NAME."
+    else
+        if ! docker_cmd run "${run_options[@]}" --name "$TUN_NAME" "${labels[@]}" \
+            --label io.hgincome.kind=tunnel --cap-add NET_ADMIN \
+            --device /dev/net/tun:/dev/net/tun \
+            --sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1 \
+            "$TUN2PROXY_IMAGE" --dns "$TUN2PROXY_DNS_MODE" --proxy "$proxy" --verbosity warn >/dev/null 2>&1; then
+            remove_failed_creation "$TUN_NAME"
+            die "Could not create tunnel for account $account device $SLOT (proxy URL hidden)."
         fi
-        if ! wait_for_tunnel; then
-            die "Tunnel for $account device $SLOT is not running. Inspect --logs --account $account --device $device --tunnel."
-        fi
-        network_options=(--network "container:$TUN_NAME" --mount "type=bind,source=$STATE_DIR/resolv.conf,target=/etc/resolv.conf,readonly")
+        new_tunnel=true
     fi
+    if ! wait_for_tunnel; then
+        die "Tunnel for $account device $SLOT is not running. Inspect its tunnel logs with --account and --device."
+    fi
+    network_options=(--network "container:$TUN_NAME" --mount "type=bind,source=$STATE_DIR/resolv.conf,target=/etc/resolv.conf,readonly")
     if exists "$APP_NAME"; then
         docker_cmd start "$APP_NAME" >/dev/null || die "Could not start $APP_NAME."
     elif ! docker_cmd run "${run_options[@]}" --name "$APP_NAME" "${labels[@]}" \
@@ -369,14 +480,8 @@ start_device() {
 start_accounts() {
     load_accounts
     [[ $ACCEPT_TOU == true ]] || die 'Review Honeygain terms, then explicitly set ACCEPT_TOU=true in properties.conf before starting.'
-    local account device needs_tun=false
-    for account in "${ACCOUNT_IDS[@]}"; do
-        [[ -z $SELECT_ACCOUNT || $account == "$SELECT_ACCOUNT" ]] || continue
-        [[ ${MODES[$account]} != proxy ]] || needs_tun=true
-    done
-    if [[ $needs_tun == true ]]; then
-        [[ -c /dev/net/tun ]] || die 'Proxy mode requires /dev/net/tun on the Linux Docker host. Docker Desktop/Git Bash is not a supported proxy runtime.'
-    fi
+    local account device
+    [[ -c /dev/net/tun ]] || die 'Proxy mode requires /dev/net/tun on the Linux Docker host. Docker Desktop/Git Bash is not a supported proxy runtime.'
     command -v sha256sum >/dev/null 2>&1 || die 'sha256sum (coreutils) is required.'
     docker_ready
     prepare_state
@@ -408,7 +513,7 @@ manage_existing() {
     fi
     if [[ $COMMAND == --logs ]]; then
         printf -v SLOT '%02d' "$SELECT_DEVICE"
-        name="hgincome-$INSTANCE_ID-$SELECT_ACCOUNT-$SLOT"
+        name="hgincome-$INSTANCE_ID-$SELECT_ACCOUNT_ID-$SLOT"
         [[ $TUNNEL_LOGS == false ]] || name+=-tun
         exists "$name" || die "Container not found: $name."
         assert_owned "$name"
@@ -430,6 +535,12 @@ manage_existing() {
         [[ $actual_kind == honeygain || $actual_kind == tunnel ]] || die "Unexpected container kind for $name."
         managed_kinds[$name]=$actual_kind
     done <<< "$MANAGED"
+    if [[ $COMMAND == --restart ]]; then
+        while IFS= read -r name; do
+            [[ ${managed_kinds[$name]} == honeygain ]] || continue
+            [[ ${managed_kinds[$name-tun]:-} == tunnel ]] || die "Tunnel missing for $name. Proxy-only restart requires an owned app/tunnel pair; stop/delete old direct containers instead."
+        done <<< "$MANAGED"
+    fi
     if [[ $COMMAND == --delete && $YES == false ]]; then
         info 'The following HGincome containers will be removed; account/proxy files and saved instance ID will be kept:'
         info "$MANAGED"
@@ -452,7 +563,7 @@ manage_existing() {
         for kind in tunnel honeygain; do
             while IFS= read -r name; do
                 actual_kind=${managed_kinds[$name]}
-            [[ $actual_kind == "$kind" ]] || continue
+                [[ $actual_kind == "$kind" ]] || continue
                 docker_cmd start "$name" >/dev/null || die "Could not start $name."
                 if [[ $kind == tunnel ]]; then
                     TUN_NAME=$name
@@ -470,12 +581,13 @@ main() {
     [[ $COMMAND != --help ]] || { usage; return; }
     load_properties
     case "$COMMAND" in
+        --accounts) list_accounts ;;
         --check)
             load_accounts
             local account total=0
             for account in "${ACCOUNT_IDS[@]}"; do
                 [[ -z $SELECT_ACCOUNT || $account == "$SELECT_ACCOUNT" ]] || continue
-                info "Account $account: ${COUNTS[$account]} device slots, ${MODES[$account]} network."
+                info "Account $account: ${COUNTS[$account]} device slots, proxy network."
                 total=$((total + COUNTS[$account]))
             done
             info "Configuration valid: $total selected device slots. No Docker containers launched."

@@ -1,23 +1,30 @@
-# Copy this structure into accounts.conf and fill in your own credentials.
-# Use only accounts/connections you are authorized to operate under current terms.
-ACCOUNT_IDS=(personal second)
+# Copy to accounts.conf and enter your own account credentials.
+# One [Name] section per account. Use any unique, case-sensitive name containing
+# 1–64 letters, digits, spaces, dots, underscores or hyphens; start with a letter
+# or digit and do not end with a space. Quote names containing spaces in commands:
+# bash HGincome "Main Account" --start
+# bash HGincome --start                  (all accounts)
+# bash HGincome --accounts               (list names, slots and proxy files)
+# Keep accounts.conf private: chmod 600 accounts.conf
+# Values after the first = are literal. Do not add quotes or inline comments.
+# Passwords may contain spaces, #, ;, =, $, quotes, and backslashes as-is.
 
-ACCOUNT_EMAIL[personal]=''
-ACCOUNT_PASSWORD[personal]=''
-ACCOUNT_DEVICES[personal]=10
-ACCOUNT_NETWORK[personal]='proxy'
-ACCOUNT_PROXY_FILE[personal]='proxies/personal.txt'
-# Optional: default is hg-<saved-instance-id>-personal.
-# ACCOUNT_DEVICE_PREFIX[personal]='my-personal-hg'
+[Main Account]
+email=
+password=
+devices=10
+proxy_file=proxies/main.txt
+# Optional; default prefix uses a stable internal account ID:
+# device_prefix=my-main-hg
 
-ACCOUNT_EMAIL[second]=''
-ACCOUNT_PASSWORD[second]=''
-ACCOUNT_DEVICES[second]=10
-ACCOUNT_NETWORK[second]='proxy'
-ACCOUNT_PROXY_FILE[second]='proxies/second.txt'
-# ACCOUNT_DEVICE_PREFIX[second]='my-second-hg'
+[Second Account]
+email=
+password=
+devices=10
+proxy_file=proxies/second.txt
+# device_prefix=my-second-hg
 
-# Without a proxy, use ACCOUNT_NETWORK[id]='direct' and ACCOUNT_DEVICES[id]=1.
-# Only one direct device is allowed across this whole folder.
-# Passwords are literal Bash strings: single quotes protect $, spaces, and !.
-# For a literal apostrophe use 'first'\''second', or another valid Bash quoting form.
+# Proxies are mandatory: one eligible, unique endpoint per device slot.
+# Omit devices to use DEVICES_PER_ACCOUNT (10 by default).
+# Omit proxy_file to use proxies/<Account Name>.txt.
+# Use only authorized accounts/connections permitted by current service terms.

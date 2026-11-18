@@ -10,7 +10,7 @@ A Bash + Docker Honeygain manager inspired by [InternetIncome-debloated](https:/
 
 - A **Linux Docker Engine host**, with Bash 4.4+ and standard coreutils.
 - Docker daemon access for the user running HGincome. No automatic `sudo`, dependency installation, downloaded-script execution, or architecture emulation.
-- For proxy mode: host `/dev/net/tun` and permission to create tunnel containers with `NET_ADMIN`. These are privileged network capabilities; review the tunnel image before using it.
+- **Proxy-only networking:** host `/dev/net/tun` and permission to create tunnel containers with `NET_ADMIN` are required. These are privileged network capabilities; review the tunnel image before using it.
 - A host architecture supported by both selected images. The Honeygain amd64 image and tun2proxy v0.8.5 entrypoint were verified on an Arch Linux x86_64 Docker host; other architectures are untested.
 - Your own Honeygain credentials and eligible, stable connections. A proxy endpoint must keep a suitable exit IP; rotating exits can change service identity or violate rules.
 
@@ -20,12 +20,13 @@ Windows Git Bash can run syntax checks. **Docker Desktop/Git Bash is not a suppo
 
 ```text
 HGincome/
-  HGincome.sh              # main entrypoint
+  HGincome                 # account-first command launcher
+  HGincome.sh              # implementation; legacy commands still supported
   properties.conf          # global settings
   accounts.conf            # private credentials/config for all accounts
   accounts.conf.example    # two-account example without real credentials
   proxies/
-    personal.txt           # first account's proxy list
+    main.txt               # first account's proxy list
     second.txt             # second account's proxy list
   restart.sh               # restart convenience wrapper
   .hgincome/               # generated private instance ID and resolver file
@@ -43,33 +44,35 @@ mkdir -p proxies
 chmod 700 proxies
 ```
 
-Edit `accounts.conf`, fill in your own credentials, and remove unused example accounts. Create each proxy list named by `ACCOUNT_PROXY_FILE`, such as `proxies/personal.txt` and `proxies/second.txt`, with your own eligible proxies. `.hgincome/` is generated automatically; do not copy another installation's state.
+Edit `accounts.conf`, fill in your own credentials, and remove unused example sections. Create each proxy list named by `proxy_file`, such as `proxies/main.txt` and `proxies/second.txt`, with your own eligible proxies. `.hgincome/` is generated automatically; do not copy another installation's state.
 
 Example account configuration:
 
-```bash
-ACCOUNT_IDS=(personal second)
+```ini
+[Main Account]
+email=your-first-email@example.com
+password=your-first-password
+devices=10
+proxy_file=proxies/main.txt
 
-ACCOUNT_EMAIL[personal]='your-first-email@example.com'
-ACCOUNT_PASSWORD[personal]='your-first-password'
-ACCOUNT_DEVICES[personal]=10
-ACCOUNT_NETWORK[personal]='proxy'
-ACCOUNT_PROXY_FILE[personal]='proxies/personal.txt'
-
-ACCOUNT_EMAIL[second]='your-second-email@example.com'
-ACCOUNT_PASSWORD[second]='your-second-password'
-ACCOUNT_DEVICES[second]=10
-ACCOUNT_NETWORK[second]='proxy'
-ACCOUNT_PROXY_FILE[second]='proxies/second.txt'
+[Second Account]
+email=your-second-email@example.com
+password=your-second-password
+devices=10
+proxy_file=proxies/second.txt
 ```
 
-- Account IDs must start with a lowercase letter and contain 1–12 lowercase letters, digits, underscores, or hyphens.
-- Omitting `ACCOUNT_DEVICES[id]` uses `DEVICES_PER_ACCOUNT=10` from `properties.conf`.
+- Each `[Account Name]` section adds one account, in file order. No separate account-name array is needed. Add another account by copying a section and changing its name, credentials, and proxy list.
+- Names are case-sensitive and may contain 1–64 letters, digits, spaces, dots, underscores, or hyphens. Start with a letter or digit; do not end with a space. Quote names with spaces in CLI commands. Names such as `personal`, `Main Account`, `Work.HG`, and `Account-2` are supported.
+- Required fields for startup: `email` and `password`. Both must be nonempty.
+- Optional `devices` defaults to `DEVICES_PER_ACCOUNT=10` from `properties.conf`; the allowed range is 1–10. `proxy_file` defaults to `proxies/<Account Name>.txt`. **Proxies are the only supported connection mode**; there is no `network` setting to configure.
 - The first non-comment proxy becomes slot `01`, the next slot `02`, through `10`. **Keep line ordering stable.** Extra valid proxies are not started; the first configured number are used.
 - Relative proxy paths are resolved from the HGincome folder, not the current terminal directory.
-- Optional `ACCOUNT_DEVICE_PREFIX[id]` sets a stable device prefix. It must be unique, at most 29 characters, and contain only letters, digits, dots, underscores, or hyphens. Otherwise the manager derives a prefix from its saved instance ID and account ID.
+- Optional `device_prefix` sets a stable device prefix. It must be unique, at most 29 characters, and contain only letters, digits, dots, underscores, or hyphens. Otherwise the manager derives a prefix from its saved instance ID and account ID.
+- Duplicate sections/keys, unknown keys, invalid names, and data outside a section are rejected with line numbers without displaying values.
+- Blank lines and full-line `#` or `;` comments are supported. CRLF line endings, a UTF-8 BOM, and a final line without a newline are accepted.
 
-Put 10 proxies in `proxies/personal.txt` and another 10 in `proxies/second.txt`, one per line:
+Put 10 proxies in `proxies/main.txt` and another 10 in `proxies/second.txt`, one per line:
 
 ```text
 socks5://username:password@host.example:1080
@@ -87,12 +90,18 @@ Protect secrets on Linux:
 chmod 600 accounts.conf proxies/*.txt
 ```
 
-These configuration files are **trusted Bash code**. Never source configuration obtained from someone else without reviewing it. Quote passwords correctly: single-quoted strings preserve spaces, `$`, `!`, and glob characters. To include an apostrophe use a Bash literal such as `'first'\''second'`.
+### Literal values and compatibility
+
+Section-based `accounts.conf` is parsed as data, **not executed as Bash**. Everything after the first `=` is preserved literally, including leading/trailing spaces, `#`, `;`, `=`, `$`, quotes, and backslashes. Do not surround values with quotes or append inline comments. For example, `password=p a$$#word=more` stores exactly `p a$$#word=more`. Write normal settings as `devices=10`, not `devices=10 # comment`; put comments on their own lines. Multiline values are not supported.
+
+Existing Bash-array files remain supported when their first non-comment line starts with `ACCOUNT_IDS=`. **Only this legacy format is sourced as trusted Bash code**; never use an unreviewed legacy file. New setups should use the section-based example. `properties.conf` remains trusted Bash code.
+
+To migrate an existing **proxy** setup, keep the same section names as the old account IDs, slot counts, proxy order, and device prefixes. Write the actual password value without Bash quoting or escaping. An old `network` value of `proxy` is accepted with a deprecation notice; remove that key. Legacy `ACCOUNT_NETWORK` must be absent or `proxy`. Direct configurations are rejected before startup; stop/delete any old direct containers before migrating. Equivalent proxy values retain the same device naming and container configuration signature; the manager never automatically rewrites your file.
 
 Validate without contacting Docker or Honeygain:
 
 ```bash
-bash HGincome.sh --check
+bash HGincome --check
 ```
 
 Review and accept Honeygain's current terms before setting this in `properties.conf`:
@@ -103,31 +112,46 @@ ACCEPT_TOU=true
 
 Starting then supplies `-tou-accept` to the Honeygain container. HGincome never assumes acceptance from the presence of credentials.
 
-## Run and manage
+## List accounts
 
 ```bash
-# Start every configured account.
-bash HGincome.sh --start
-
-# Start or inspect one account.
-bash HGincome.sh --start --account personal
-bash HGincome.sh --status --account personal
-
-# Read application or tunnel logs for one slot.
-bash HGincome.sh --logs --account personal --device 1 --tail 100
-bash HGincome.sh --logs --account personal --device 1 --tunnel
-
-# Stop without deleting configuration or identity.
-bash HGincome.sh --stop
-bash HGincome.sh --stop --account personal
-
-# Restart applications and tunnels in dependency order.
-bash HGincome.sh --restart
-bash restart.sh --account personal
-
-# Optional: explicitly pull configured images.
-bash HGincome.sh --pull
+bash HGincome --accounts
+bash HGincome "Main Account" --accounts
 ```
+
+Lists account names, configured device counts, and proxy-file paths in file order. It does not require Docker, completed credentials, or populated proxy files, and it never prints emails, passwords, or proxy URLs. It reads configured accounts, not live container state; use `--status` for containers. An empty account file reports no accounts.
+
+## Run and manage
+
+Use the section name from `[Account Name]` as the first argument. Each command manages that account's full group of configured devices and matching tunnels, not just one device:
+
+```bash
+bash HGincome "Main Account" --start
+bash HGincome "Main Account" --status
+bash HGincome "Main Account" --stop
+bash HGincome "Main Account" --restart
+bash HGincome "Main Account" --delete
+```
+
+For example, `Main Account` and `Second Account` each have 10 slots in the configuration above. `bash HGincome "Main Account" --start` starts only that account's devices; `bash HGincome "Second Account" --delete` removes only the second account's app/tunnel containers. Deletion still asks for confirmation and keeps account configuration, proxies, and the saved instance ID.
+
+```bash
+# Start every configured account by omitting the account argument.
+bash HGincome --start
+
+# Read application or tunnel logs for one slot in an account.
+bash HGincome "Main Account" --logs --device 1 --tail 100
+bash HGincome "Main Account" --logs --device 1 --tunnel
+
+# Stop or restart all managed accounts.
+bash HGincome --stop
+bash HGincome --restart
+
+# Optional: explicitly pull configured images (not account-specific).
+bash HGincome --pull
+```
+
+`bash HGincome "Main Account" --check` validates configuration without launching Docker. `bash HGincome --help` shows the available commands. `HGincome.sh` accepts the same account-first syntax, and existing commands such as `bash HGincome.sh --start --account personal` remain supported. Specify the account only once. Both launchers resolve configuration relative to their own folder, so they can be called from another working directory.
 
 `--start` reuses matching containers. If a device's credentials, proxy, network mode, images, prefix, or container options changed, it refuses to reuse stale containers. Previously started accounts remain running if a later startup fails; no whole-folder rollback or automatic deletion is performed.
 
@@ -138,44 +162,30 @@ Docker's configured restart policy controls host-reboot behavior. The default is
 Delete that account's existing containers before changing its slot count or reassigning proxies. When selected accounts contain leftover slots or a full-folder start finds a removed account, `--start` lists those containers and refuses to proceed. It does not silently delete them.
 
 ```bash
-bash HGincome.sh --delete --account personal
-# Edit accounts.conf and proxies/personal.txt.
-bash HGincome.sh --check
-bash HGincome.sh --start --account personal
+bash HGincome "Main Account" --delete
+# Edit accounts.conf and proxies/main.txt.
+bash HGincome "Main Account" --check
+bash HGincome "Main Account" --start
 ```
 
 `--delete` first inspects ownership labels, lists the selected containers, and prompts for `DELETE`. Use `--yes` only when intentionally confirming a noninteractive deletion:
 
 ```bash
-bash HGincome.sh --delete --account personal --yes
+bash HGincome "Main Account" --delete --yes
 ```
 
 It removes only containers carrying this folder's instance label. Other Docker applications, other HGincome folders, images, account files, proxy files, and the saved instance ID are not removed. Status, logs, stop, restart, and delete do not require valid account credentials, so an account can still be cleaned up after its config is removed.
-
-### Direct mode
-
-One account can use the host connection without a proxy:
-
-```bash
-ACCOUNT_IDS=(personal)
-ACCOUNT_EMAIL[personal]='your-email@example.com'
-ACCOUNT_PASSWORD[personal]='your-password'
-ACCOUNT_NETWORK[personal]='direct'
-ACCOUNT_DEVICES[personal]=1
-```
-
-Only **one direct device across the whole folder** is permitted. Proxy mode supplies separate network namespaces, not automatic permission to share one public IP or bypass Honeygain rules.
 
 ## Identity and isolation
 
 The first successful startup saves a random ID in `.hgincome/instance-id`. Container names are:
 
 ```text
-hgincome-<instance>-<account>-01
-hgincome-<instance>-<account>-01-tun
+hgincome-<instance>-<internal-account-id>-01
+hgincome-<instance>-<internal-account-id>-01-tun
 ```
 
-Default Honeygain device names are `hg-<instance>-<account>-01`. The same account ID and slot keep their name after deletion/recreation as long as `.hgincome/instance-id` and the prefix remain unchanged. This preserves local naming; it does not guarantee Honeygain will recognize a recreated container as the same device.
+Default Honeygain device names are `hg-<instance>-<internal-account-id>-01`. Existing lowercase account IDs up to 12 characters keep their original internal ID. Custom names use a deterministic short hash so Docker/device names remain valid and bounded; the readable name is stored in labels. Names are case-sensitive. Renaming a section changes its identity: delete/stop the old name's containers before renaming it, or use the old name to clean them up afterward. The same name and slot keep their device name after deletion/recreation as long as `.hgincome/instance-id` and the prefix remain unchanged. This preserves local naming; it does not guarantee Honeygain will recognize a recreated container as the same device.
 
 **Keep `.hgincome/instance-id`.** Deleting it while containers exist loses management ownership and can lead to duplicate deployments. Back it up with your private configuration. Do not run copied folders sharing the same instance ID on the same Docker host; that would share management scope.
 
